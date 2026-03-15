@@ -20,11 +20,21 @@ Philosophy: follow builders with original opinions, not influencers who regurgit
 
 ## Detecting Platform
 
-Before doing anything, figure out which platform you're running on:
-- **OpenClaw:** Check if `openclaw` CLI is available or if OpenClaw environment variables exist
-- **Claude Code:** You're running in Claude Code if you have access to Claude Code tools
+Before doing anything, detect which platform you're running on by running:
+```bash
+which openclaw 2>/dev/null && echo "PLATFORM=openclaw" || echo "PLATFORM=other"
+```
 
-This affects how you set up cron jobs and deliver content.
+- **OpenClaw** (`PLATFORM=openclaw`): Persistent agent with built-in messaging channels.
+  Delivery is automatic via OpenClaw's channel system. No need to ask about delivery method.
+  Cron uses `openclaw cron add`.
+
+- **Other** (Claude Code, Cursor, etc.): Non-persistent agent. Terminal closes = agent stops.
+  For automatic delivery, users MUST set up Telegram or Email. Without it, digests
+  are on-demand only (user types `/ai` to get one).
+  Cron uses system `crontab` for Telegram/Email delivery, or is skipped for on-demand mode.
+
+Save the detected platform in config.json as `"platform": "openclaw"` or `"platform": "other"`.
 
 ## First Run — Onboarding
 
@@ -58,12 +68,24 @@ For weekly, also ask which day.
 
 ### Step 3: Delivery Method
 
-Ask: "How would you like to receive your digest?"
-- **Telegram** — I'll send it to you as a Telegram message
-- **Email** — I'll email it to you
-- **Right here** — I'll show it in this chat (only works if you're using OpenClaw or a persistent agent)
+**If OpenClaw:** SKIP this step entirely. OpenClaw already delivers messages to the
+user's Telegram/Discord/WhatsApp/etc. Set `delivery.method` to `"stdout"` in config
+and move on.
 
-**If Telegram:**
+**If non-persistent agent (Claude Code, Cursor, etc.):**
+
+Tell the user:
+
+"Since you're not using a persistent agent, I need a way to send you the digest
+when you're not in this terminal. You have two options:
+
+1. **Telegram** — I'll send it as a Telegram message (free, takes ~5 min to set up)
+2. **Email** — I'll email it to you (requires a free Resend account)
+
+Or you can skip this and just type /ai whenever you want your digest — but it
+won't arrive automatically."
+
+**If they choose Telegram:**
 Guide the user step by step:
 1. Open Telegram and search for @BotFather
 2. Send /newbot to BotFather
@@ -80,7 +102,7 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -c "import sy
 
 Save the chat ID in config.json under `delivery.chatId`.
 
-**If Email:**
+**If they choose Email:**
 Ask for their email address.
 Then they need a Resend API key:
 1. Go to https://resend.com
@@ -89,6 +111,10 @@ Then they need a Resend API key:
 4. Create a new key and copy it
 
 Add the key to the .env file.
+
+**If they choose on-demand:**
+Set `delivery.method` to `"stdout"`. Tell them: "No problem — just type /ai
+whenever you want your digest. No automatic delivery will be set up."
 
 ### Step 4: Language
 
@@ -159,15 +185,21 @@ No need to edit any files — just tell me what you want."
 
 ### Step 8: Set Up Cron
 
-Save the config:
+Save the config (include all fields — fill in the user's choices):
 ```bash
 cat > ~/.follow-builders/config.json << 'CFGEOF'
 {
-  "language": "<chosen language>",
-  "timezone": "<chosen timezone>",
+  "platform": "<openclaw or other>",
+  "language": "<en, zh, or bilingual>",
+  "timezone": "<IANA timezone>",
   "frequency": "<daily or weekly>",
-  "deliveryTime": "<chosen time>",
-  "weeklyDay": "<if weekly, chosen day>",
+  "deliveryTime": "<HH:MM>",
+  "weeklyDay": "<day of week, only if weekly>",
+  "delivery": {
+    "method": "<stdout, telegram, or email>",
+    "chatId": "<telegram chat ID, only if telegram>",
+    "email": "<email address, only if email>"
+  },
   "sources": {
     "addedPodcasts": [],
     "removedPodcasts": [],
@@ -179,9 +211,9 @@ cat > ~/.follow-builders/config.json << 'CFGEOF'
 CFGEOF
 ```
 
-Then set up the cron job:
+Then set up the scheduled job based on platform AND delivery method:
 
-**For OpenClaw:**
+**OpenClaw:**
 ```bash
 openclaw cron add \
   --name "AI Builders Digest" \
@@ -193,8 +225,20 @@ openclaw cron add \
   --channel last
 ```
 
-**For Claude Code:**
-Use the CronCreate tool to schedule the digest at the user's preferred time.
+**Non-persistent agent + Telegram or Email delivery:**
+Use system crontab so it runs even when the terminal is closed:
+```bash
+SKILL_DIR="<absolute path to the skill directory>"
+(crontab -l 2>/dev/null; echo "<cron expression> cd $SKILL_DIR/scripts && node fetch-content.js 2>/dev/null | node deliver.js 2>/dev/null") | crontab -
+```
+Note: this runs the fetcher and pipes its output directly to the delivery script,
+bypassing the agent entirely. The digest won't be remixed by an LLM — it will
+deliver the raw JSON. For full remixed digests, the user should use /ai manually
+or switch to OpenClaw.
+
+**Non-persistent agent + on-demand only (no Telegram/Email):**
+Skip cron setup entirely. Tell the user: "Since you chose on-demand delivery,
+there's no scheduled job. Just type /ai whenever you want your digest."
 
 ### Step 9: Welcome Digest
 
@@ -214,8 +258,12 @@ After delivering the digest, ask for feedback:
 - Is there anything you'd like me to focus on more (or less)?
 - Any builders or podcasts you'd like to add or remove?
 
-Just tell me and I'll adjust. Your next digest will arrive automatically at
-[their chosen time]."
+Just tell me and I'll adjust."
+
+Then add the appropriate closing line based on their setup:
+- **OpenClaw or Telegram/Email delivery:** "Your next digest will arrive
+  automatically at [their chosen time]."
+- **On-demand only:** "Type /ai anytime you want your next digest."
 
 Wait for their response and apply any feedback (update config.json or prompt files
 as needed). Then confirm the changes.
