@@ -41,12 +41,13 @@ async function loadSources() {
 // -- YouTube Fetching (Supadata API) -----------------------------------------
 
 async function fetchYouTubeContent(podcasts, apiKey, errors) {
-  const results = [];
   const cutoff = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000);
+
+  // Phase 1: Collect candidates with metadata (no transcripts yet)
+  const allCandidates = [];
 
   for (const podcast of podcasts) {
     try {
-      // Get recent video IDs
       let videosUrl;
       if (podcast.type === 'youtube_playlist') {
         videosUrl = `${SUPADATA_BASE}/youtube/playlist/videos?id=${podcast.playlistId}`;
@@ -66,49 +67,27 @@ async function fetchYouTubeContent(podcasts, apiKey, errors) {
       const videosData = await videosRes.json();
       const videoIds = videosData.videoIds || videosData.video_ids || [];
 
-      // Check the first 3 videos for recency
-      for (const videoId of videoIds.slice(0, 3)) {
+      // Check the first 2 videos per channel for metadata
+      for (const videoId of videoIds.slice(0, 2)) {
         try {
-          // Get metadata
           const metaRes = await fetch(
             `${SUPADATA_BASE}/youtube/video?id=${videoId}`,
             { headers: { 'x-api-key': apiKey } }
           );
-
           if (!metaRes.ok) continue;
           const meta = await metaRes.json();
           const publishedAt = meta.uploadDate || meta.publishedAt || meta.date || null;
 
-          // Skip videos older than our lookback
-          if (publishedAt && new Date(publishedAt) < cutoff) continue;
-
-          // Fetch transcript
-          const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-          const transcriptRes = await fetch(
-            `${SUPADATA_BASE}/youtube/transcript?url=${encodeURIComponent(videoUrl)}&text=true`,
-            { headers: { 'x-api-key': apiKey } }
-          );
-
-          if (!transcriptRes.ok) {
-            errors.push(`YouTube: Failed to get transcript for ${videoId}: HTTP ${transcriptRes.status}`);
-            continue;
-          }
-
-          const transcriptData = await transcriptRes.json();
-
-          results.push({
-            source: 'podcast',
-            name: podcast.name,
-            title: meta.title || 'Untitled',
+          allCandidates.push({
+            podcast,
             videoId,
-            url: `https://youtube.com/watch?v=${videoId}`,
-            publishedAt,
-            transcript: transcriptData.content || ''
+            title: meta.title || 'Untitled',
+            description: meta.description || '',
+            publishedAt
           });
-
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 300));
         } catch (err) {
-          errors.push(`YouTube: Error processing video ${videoId}: ${err.message}`);
+          errors.push(`YouTube: Error fetching metadata for ${videoId}: ${err.message}`);
         }
       }
     } catch (err) {
@@ -116,7 +95,46 @@ async function fetchYouTubeContent(podcasts, apiKey, errors) {
     }
   }
 
-  return results;
+  // Phase 2: Pick the 1 most recent video from the last 24 hours
+  // Sort by date (newest first), take the first one within cutoff
+  const sorted = allCandidates
+    .filter(v => v.publishedAt)
+    .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+
+  let selected = sorted.find(v => new Date(v.publishedAt) >= cutoff);
+  // If nothing in the last 24h, take the most recent one anyway
+  if (!selected && sorted.length > 0) selected = sorted[0];
+
+  if (!selected) return [];
+
+  // Phase 3: Fetch transcript for the selected video only
+  try {
+    const videoUrl = `https://www.youtube.com/watch?v=${selected.videoId}`;
+    const transcriptRes = await fetch(
+      `${SUPADATA_BASE}/youtube/transcript?url=${encodeURIComponent(videoUrl)}&text=true`,
+      { headers: { 'x-api-key': apiKey } }
+    );
+
+    if (!transcriptRes.ok) {
+      errors.push(`YouTube: Failed to get transcript for ${selected.videoId}: HTTP ${transcriptRes.status}`);
+      return [];
+    }
+
+    const transcriptData = await transcriptRes.json();
+
+    return [{
+      source: 'podcast',
+      name: selected.podcast.name,
+      title: selected.title,
+      videoId: selected.videoId,
+      url: `https://youtube.com/watch?v=${selected.videoId}`,
+      publishedAt: selected.publishedAt,
+      transcript: transcriptData.content || ''
+    }];
+  } catch (err) {
+    errors.push(`YouTube: Error fetching transcript for ${selected.videoId}: ${err.message}`);
+    return [];
+  }
 }
 
 // -- X/Twitter Fetching (Official API v2) ------------------------------------
@@ -253,28 +271,41 @@ async function main() {
   const xContent = await fetchXContent(sources.x_accounts, xBearerToken, errors);
   console.error(`  Found ${xContent.length} builders with new tweets`);
 
-  // Build the feed
-  const feed = {
+  const scriptDir = decodeURIComponent(new URL('.', import.meta.url).pathname);
+  const totalTweets = xContent.reduce((sum, a) => sum + a.tweets.length, 0);
+
+  // Write two separate feeds
+  const xFeed = {
+    generatedAt: new Date().toISOString(),
+    lookbackHours: LOOKBACK_HOURS,
+    x: xContent,
+    stats: {
+      xBuilders: xContent.length,
+      totalTweets
+    },
+    errors: errors.filter(e => e.startsWith('X API')).length > 0
+      ? errors.filter(e => e.startsWith('X API'))
+      : undefined
+  };
+
+  const podcastFeed = {
     generatedAt: new Date().toISOString(),
     lookbackHours: LOOKBACK_HOURS,
     podcasts,
-    x: xContent,
     stats: {
-      podcastEpisodes: podcasts.length,
-      xBuilders: xContent.length,
-      totalTweets: xContent.reduce((sum, a) => sum + a.tweets.length, 0)
+      podcastEpisodes: podcasts.length
     },
-    errors: errors.length > 0 ? errors : undefined
+    errors: errors.filter(e => e.startsWith('YouTube')).length > 0
+      ? errors.filter(e => e.startsWith('YouTube'))
+      : undefined
   };
 
-  // Write to feed.json in the repo root (GitHub Pages will serve this)
-  const scriptDir = decodeURIComponent(new URL('.', import.meta.url).pathname);
-  const feedPath = join(scriptDir, '..', 'feed.json');
-  await writeFile(feedPath, JSON.stringify(feed, null, 2));
+  await writeFile(join(scriptDir, '..', 'feed-x.json'), JSON.stringify(xFeed, null, 2));
+  await writeFile(join(scriptDir, '..', 'feed-podcasts.json'), JSON.stringify(podcastFeed, null, 2));
 
-  console.error(`\nFeed written to feed.json`);
-  console.error(`  ${feed.stats.podcastEpisodes} podcast episodes`);
-  console.error(`  ${feed.stats.xBuilders} builders, ${feed.stats.totalTweets} tweets`);
+  console.error(`\nFeeds written:`);
+  console.error(`  feed-x.json: ${xContent.length} builders, ${totalTweets} tweets`);
+  console.error(`  feed-podcasts.json: ${podcasts.length} episodes`);
   if (errors.length > 0) {
     console.error(`  ${errors.length} non-fatal errors`);
   }

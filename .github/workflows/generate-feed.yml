@@ -28,10 +28,10 @@ jobs:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
         run: cd scripts && node generate-feed.js
 
-      - name: Commit and push feed.json
+      - name: Commit and push feeds
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add feed.json
-          git diff --cached --quiet || git commit -m "chore: update feed.json [skip ci]"
+          git add feed-x.json feed-podcasts.json
+          git diff --cached --quiet || git commit -m "chore: update feeds [skip ci]"
           git push

@@ -264,21 +264,18 @@ Read `~/.follow-builders/config.json` for user preferences.
 
 ### Step 2: Fetch Content
 
-Fetch the central feed — a pre-built JSON file that's updated every 6 hours
-with the latest content from all sources. Users don't need any API keys.
+Fetch the two central feeds — pre-built JSON files updated every 6 hours.
+Users don't need any API keys.
 
 ```bash
-curl -sf "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed.json" -o /tmp/fb-feed.json
+curl -sf "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json" -o /tmp/fb-feed-x.json
+curl -sf "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json" -o /tmp/fb-feed-podcasts.json
 ```
 
-If the fetch fails (offline, etc.), tell the user: "Could not reach the content
-feed. Please check your internet connection and try again."
+If either fetch fails, skip that section and deliver whatever you got.
 
-Read the JSON from `/tmp/fb-feed.json`. It contains:
-- `podcasts`: array of podcast episodes with full transcripts
-- `x`: array of builders with their recent tweets (text, links, engagement)
-- `stats`: counts of episodes and tweets
-- `errors`: any non-fatal issues (IGNORE these)
+- `feed-x.json` (~25KB): builders with their recent tweets
+- `feed-podcasts.json` (~120KB): 1 podcast episode with full transcript
 
 **IMPORTANT — Error Handling:**
 - If the JSON has an `"errors"` array, those are non-fatal warnings. IGNORE THEM.
